@@ -1,0 +1,55 @@
+name: Docker 镜像构建与发布
+
+on:
+  push:
+    branches: [ "dev" ]
+    tags: [ "v*.*.*" ]
+  pull_request:
+    branches: [ "dev" ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+
+    - name: 设置 Docker QEMU
+      uses: docker/setup-qemu-action@v2
+
+    - name: 设置 Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: 登录 Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_TOKEN }}
+
+    - name: 提取镜像元数据
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ secrets.DOCKER_USERNAME }}/rawbox
+        tags: |
+          type=raw,value=dev
+
+    - name: 构建并推送镜像
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+
+    # 推送README.md到Docker Hub作为镜像简介
+    - name: 更新 Docker Hub 描述
+      if: github.event_name != 'pull_request'
+      uses: peter-evans/dockerhub-description@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_TOKEN }}
+        repository: ${{ secrets.DOCKER_USERNAME }}/rawbox
+        readme-filepath: README.md

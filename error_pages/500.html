@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>服务器错误</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #fdfdfd;
+      color: #222;
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, "PingFang SC", sans-serif;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .box {
+      max-width: 480px;
+      text-align: center;
+      padding: 2.6rem 2rem;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+    }
+    .icon {
+      font-size: 4rem;
+      color: #2f3542;
+      margin-bottom: 1rem;
+    }
+    .title {
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: #2f3542;
+      margin: 0 0 0.8rem;
+    }
+    .msg {
+      font-size: 1.125rem;
+      line-height: 1.6;
+      color: #555;
+      margin: 0 0 1.5rem;
+    }
+    .tip {
+      font-size: 0.95rem;
+      color: #888;
+      line-height: 1.5;
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px dashed #e0e0e0;
+    }
+    a {
+      color: #2f3542;
+      font-weight: 600;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(47, 53, 66, 0.3);
+    }
+    a:hover {
+      border-bottom-color: #2f3542;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="icon">🛠️</div>
+    <h2 class="title">服务器出错了</h2>
+    <p class="msg">
+      我们在处理您的请求时遇到了内部问题，暂时无法完成操作。
+    </p>
+    <div class="tip">
+      工程师正在努力修复。<br>
+      请稍后再试，或联系技术支持。
+    </div>
+  </div>
+</body>
+</html>

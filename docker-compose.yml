@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  rawbox:
+    image: dongshull/rawbox
+    container_name: RawBox
+    network_mode: bridge
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data:rw
+    environment:
+      # 服务端口（这里指定容器启动的端口）
+      - PORT=8080
+      # 明确指定数据目录
+      - DATA_DIR=/data
+      # API tokens，用逗号分隔多个token
+      - API_TOKENS=token1,token2,token3
+      # UA 白名单
+      - UA_WHITELIST=Mozilla,Chrome
+      # UA 黑名单
+      - UA_BLACKLIST=Bot,Spider
+      # 时区设置
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
