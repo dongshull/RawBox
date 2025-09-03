@@ -2,13 +2,15 @@ name: 并行发布流程
 
 on:
   push:
-    tags: ['v*']  # push v1.2.3 等标签
+    tags: ['v*']  # push v1.2.3 等标签触发
   workflow_dispatch:  # 手动触发
     inputs:
       version:
         description: 'Version to release (e.g. 1.2.3)'
         required: true
         default: '1.0.0'
+  release:
+    types: [published]  # 当创建新的GitHub Release时触发
 
 env:
   GO_VERSION: '1.22'
@@ -192,10 +194,8 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
 
       - name: 显示生成的标签
         run: |

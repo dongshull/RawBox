@@ -3,7 +3,6 @@ name: Docker 镜像构建与发布
 on:
   push:
     branches: [ "dev" ]
-    tags: [ "v*.*.*" ]
   pull_request:
     branches: [ "dev" ]
 
