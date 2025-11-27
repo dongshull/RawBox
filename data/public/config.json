@@ -1,0 +1,15 @@
+{
+  "app": "RawBox",
+  "version": "0.1.0",
+  "port": 18080,
+  "description": "A lightweight Docker image for converting NAS directory to GitHub raw-like direct link service",
+  "features": [
+    "Public file direct link access",
+    "Private file access control with API Token",
+    "API token authentication",
+    "User agent whitelist/blacklist filtering",
+    "Access logging",
+    "Custom error pages",
+    "Text file direct display"
+  ]
+}

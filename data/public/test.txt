@@ -1,0 +1,7 @@
+This is a public test file.
+You can access this file without any authentication.
+
+Content:
+- Line 1
+- Line 2
+- Line 3

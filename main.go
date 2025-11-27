@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -22,11 +25,53 @@ const (
 	errorPagesDir = "error_pages"
 )
 
+// SessionData 会话数据结构
+type SessionData struct {
+	Username  string
+	LoginTime int64
+	ExpiresAt int64
+}
+
+// LoginRequest 登录请求结构
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// LoginResponse 登录响应结构
+type LoginResponse struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Token   string `json:"token,omitempty"`
+}
+
+// FileListResponse 文件列表响应结构
+type FileListResponse struct {
+	Code    int        `json:"code"`
+	Message string     `json:"message"`
+	Files   []FileInfo `json:"files,omitempty"`
+}
+
+// FileInfo 文件信息结构
+type FileInfo struct {
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	IsDir bool   `json:"is_dir"`
+	Time  string `json:"time"`
+}
+
 var (
-	dataDir = "./data"
-	port    = 8080
-	tokens  = make(map[string]bool)
-	tokenMu sync.RWMutex
+	dataDir        = "./data"
+	port           = 18080
+	adminUsername  = "admin"
+	adminPassword  = "admin123456"
+	sessionSecret  = "rawbox-secret"
+	sessionTimeout = int64(3600)
+	tokens         = make(map[string]bool)
+	tokenMu        sync.RWMutex
+	sessions       = make(map[string]SessionData)
+	sessionsMu     sync.RWMutex
+	startTime      time.Time
 )
 
 // UARules 定义UA规则结构
@@ -74,18 +119,38 @@ func (r *responseWriterDelegator) GetStatusCode() int {
 	return r.statusCode
 }
 
+// corsMiddleware 添加CORS头的中间件
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 设置CORS响应头
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Session-Token")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		// 处理OPTIONS预检请求
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// 继续处理其他请求
+		next(w, r)
+	}
+}
+
 // loggingMiddleware 记录请求日志的中间件
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 创建responseWriterDelegator以捕获状态码
 		delegator := &responseWriterDelegator{ResponseWriter: w, statusCode: http.StatusOK}
-		
+
 		// 记录请求开始时间
 		startTime := time.Now()
-		
+
 		// 处理请求
 		next(delegator, r)
-		
+
 		// 记录日志（在请求处理完成后记录，使用实际的状态码）
 		logRequest(r, delegator.GetStatusCode(), startTime)
 	}
@@ -123,7 +188,7 @@ func logRequest(r *http.Request, statusCode int, startTime time.Time) {
 	if _, err := file.WriteString(logEntry); err != nil {
 		log.Printf("Failed to write to log file: %v", err)
 	}
-	
+
 	// 同时在控制台输出简化的访问日志（使用fmt.Printf避免重复时间戳）
 	fmt.Printf("%s, %s, %s, %s, %d\n",
 		startTime.Format("2006/01/02 15:04:05"),
@@ -156,18 +221,22 @@ func getRealIP(r *http.Request) string {
 	if colonIndex := strings.LastIndex(ip, ":"); colonIndex != -1 {
 		ip = ip[:colonIndex]
 	}
-	
+
 	return ip
 }
 
 func main() {
+	startTime = time.Now()
 	log.Println("RawBox starting...")
+
+	// 加载 .env 文件
+	loadEnvFile(".env")
 
 	// 检查环境变量
 	if envDataDir := os.Getenv("DATA_DIR"); envDataDir != "" {
 		dataDir = envDataDir
 	}
-	
+
 	// 检查端口环境变量
 	if envPort := os.Getenv("PORT"); envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 && p <= 65535 {
@@ -177,6 +246,27 @@ func main() {
 		}
 	}
 
+	// 加载管理员配置
+	if envAdminUsername := os.Getenv("ADMIN_USERNAME"); envAdminUsername != "" {
+		adminUsername = envAdminUsername
+	}
+	if envAdminPassword := os.Getenv("ADMIN_PASSWORD"); envAdminPassword != "" {
+		adminPassword = envAdminPassword
+	}
+
+	// 加载会话配置
+	if envSessionSecret := os.Getenv("SESSION_SECRET"); envSessionSecret != "" {
+		sessionSecret = envSessionSecret
+	}
+	if envSessionTimeout := os.Getenv("SESSION_TIMEOUT"); envSessionTimeout != "" {
+		if timeout, err := strconv.ParseInt(envSessionTimeout, 10, 64); err == nil && timeout > 0 {
+			sessionTimeout = timeout
+		}
+	}
+
+	log.Printf("Admin username: %s", adminUsername)
+	log.Printf("Session timeout: %d seconds", sessionTimeout)
+
 	// 初始化目录
 	initDir()
 
@@ -184,8 +274,17 @@ func main() {
 	loadTokens()
 	loadUARules()
 
-	// 设置HTTP路由
-	http.HandleFunc("/", loggingMiddleware(handler))
+	// 设置HTTP路由 (应用CORS和日志中间件)
+	// 健康检查接口
+	http.HandleFunc("/health", corsMiddleware(loggingMiddleware(healthCheck)))
+	// 登录接口
+	http.HandleFunc("/admin/login", corsMiddleware(loggingMiddleware(adminLogin)))
+	// 获取文件列表接口
+	http.HandleFunc("/admin/files", corsMiddleware(loggingMiddleware(adminFiles)))
+	// 获取日志接口
+	http.HandleFunc("/admin/logs", corsMiddleware(loggingMiddleware(adminLogs)))
+	// 原有的文件访问接口
+	http.HandleFunc("/", corsMiddleware(loggingMiddleware(handler)))
 
 	// 启动HTTP服务
 	addr := fmt.Sprintf(":%d", port)
@@ -244,20 +343,20 @@ func initDir() {
 	// copyErrorPagesIfNeeded(errorPagesPath)
 
 	log.Println("Directory structure checked/created successfully")
-	
+
 	// 验证目录是否真正创建
 	if _, err := os.Stat(publicPath); os.IsNotExist(err) {
 		log.Fatalf("Failed to verify public directory creation: %v", err)
 	}
-	
+
 	if _, err := os.Stat(privatePath); os.IsNotExist(err) {
 		log.Fatalf("Failed to verify private directory creation: %v", err)
 	}
-	
+
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
 		log.Fatalf("Failed to verify log directory creation: %v", err)
 	}
-	
+
 	log.Println("All directories verified successfully")
 }
 
@@ -265,14 +364,14 @@ func initDir() {
 func serveErrorPage(w http.ResponseWriter, r *http.Request, errorCode int) {
 	// 构建错误页面文件路径（使用镜像内部的error_pages目录）
 	errorPagePath := filepath.Join(errorPagesDir, fmt.Sprintf("%d.html", errorCode))
-	
+
 	// 检查错误页面文件是否存在
 	if _, err := os.Stat(errorPagePath); err == nil {
 		// 如果存在，提供自定义错误页面
 		http.ServeFile(w, r, errorPagePath)
 		return
 	}
-	
+
 	// 如果自定义错误页面不存在，使用默认错误处理
 	var errorMsg string
 	switch errorCode {
@@ -287,8 +386,300 @@ func serveErrorPage(w http.ResponseWriter, r *http.Request, errorCode int) {
 	default:
 		errorMsg = http.StatusText(errorCode)
 	}
-	
+
 	http.Error(w, errorMsg, errorCode)
+}
+
+// loadEnvFile 从 .env 文件加载环境变量
+func loadEnvFile(filePath string) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		// .env 文件不存在或无法读取，这不是致命错误
+		log.Printf("Warning: Unable to load .env file: %v", err)
+		return
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		// 去除空白和注释
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// 解析 KEY=VALUE 格式
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		// 移除引号（如果有的话）
+		if (strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"")) ||
+			(strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'")) {
+			value = value[1 : len(value)-1]
+		}
+
+		// 只有在环境变量未设置时才从文件中读取
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
+}
+
+// generateSessionToken 生成会话令牌
+func generateSessionToken(username string) string {
+	return hex.EncodeToString(md5.New().Sum([]byte(fmt.Sprintf("%s%s%d", username, sessionSecret, time.Now().UnixNano()))))
+}
+
+// adminLogin 处理管理员登录请求
+func adminLogin(w http.ResponseWriter, r *http.Request) {
+	// 只接受 POST 请求
+	if r.Method != http.MethodPost {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(LoginResponse{
+			Code:    405,
+			Message: "Method not allowed",
+		})
+		return
+	}
+
+	// 解析登录请求
+	var loginReq LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(LoginResponse{
+			Code:    400,
+			Message: "Invalid request body",
+		})
+		return
+	}
+
+	// 验证用户名和密码
+	if loginReq.Username != adminUsername || loginReq.Password != adminPassword {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(LoginResponse{
+			Code:    401,
+			Message: "Invalid username or password",
+		})
+		return
+	}
+
+	// 生成会话令牌
+	sessionToken := generateSessionToken(loginReq.Username)
+	expiresAt := time.Now().Unix() + sessionTimeout
+
+	// 保存会话
+	sessionsMu.Lock()
+	sessions[sessionToken] = SessionData{
+		Username:  loginReq.Username,
+		LoginTime: time.Now().Unix(),
+		ExpiresAt: expiresAt,
+	}
+	sessionsMu.Unlock()
+
+	// 返回成功响应
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(LoginResponse{
+		Code:    200,
+		Message: "Login successful",
+		Token:   sessionToken,
+	})
+}
+
+// isValidSession 检查会话是否有效
+func isValidSession(token string) bool {
+	if token == "" {
+		return false
+	}
+
+	sessionsMu.RLock()
+	defer sessionsMu.RUnlock()
+
+	session, exists := sessions[token]
+	if !exists {
+		return false
+	}
+
+	// 检查会话是否过期
+	if time.Now().Unix() > session.ExpiresAt {
+		sessionsMu.RUnlock()
+		sessionsMu.Lock()
+		delete(sessions, token)
+		sessionsMu.Unlock()
+		return false
+	}
+
+	return true
+}
+
+// adminFiles 处理管理员文件列表请求
+func adminFiles(w http.ResponseWriter, r *http.Request) {
+	// 只接受 GET 请求
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(FileListResponse{
+			Code:    405,
+			Message: "Method not allowed",
+		})
+		return
+	}
+
+	// 检查会话令牌
+	sessionToken := r.Header.Get("X-Session-Token")
+	if !isValidSession(sessionToken) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(FileListResponse{
+			Code:    401,
+			Message: "Unauthorized: Invalid or expired session",
+		})
+		return
+	}
+
+	// 获取要列出的目录
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		dir = "."
+	}
+
+	// 防止路径遍历
+	if strings.Contains(dir, "..") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(FileListResponse{
+			Code:    400,
+			Message: "Invalid directory path",
+		})
+		return
+	}
+
+	fullPath := filepath.Join(dataDir, dir)
+
+	// 列出目录内容
+	entries, err := os.ReadDir(fullPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(FileListResponse{
+			Code:    500,
+			Message: fmt.Sprintf("Failed to read directory: %v", err),
+		})
+		return
+	}
+
+	var files []FileInfo
+	for _, entry := range entries {
+		info, _ := entry.Info()
+		files = append(files, FileInfo{
+			Name:  entry.Name(),
+			Size:  info.Size(),
+			IsDir: entry.IsDir(),
+			Time:  info.ModTime().Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(FileListResponse{
+		Code:    200,
+		Message: "Success",
+		Files:   files,
+	})
+}
+
+// adminLogs 处理管理员日志请求
+func adminLogs(w http.ResponseWriter, r *http.Request) {
+	// 只接受 GET 请求
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code":    405,
+			"message": "Method not allowed",
+		})
+		return
+	}
+
+	// 检查会话令牌
+	sessionToken := r.Header.Get("X-Session-Token")
+	if !isValidSession(sessionToken) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code":    401,
+			"message": "Unauthorized: Invalid or expired session",
+		})
+		return
+	}
+
+	// 获取要查看的日志文件
+	logFile := r.URL.Query().Get("file")
+	logPath := filepath.Join(dataDir, logDir)
+
+	if logFile != "" {
+		// 防止路径遍历
+		if strings.Contains(logFile, "..") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    400,
+				"message": "Invalid file path",
+			})
+			return
+		}
+
+		fullPath := filepath.Join(logPath, logFile)
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"code":    404,
+				"message": "Log file not found",
+			})
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write(content)
+		return
+	}
+
+	// 列出所有日志文件
+	files, err := os.ReadDir(logPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"code":    500,
+			"message": "Failed to read log directory",
+		})
+		return
+	}
+
+	var logFiles []string
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".txt") {
+			logFiles = append(logFiles, file.Name())
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code":    200,
+		"message": "Success",
+		"logs":    logFiles,
+	})
 }
 
 // handler 处理所有HTTP请求
@@ -296,7 +687,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	// 获取请求路径和API token
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	token := r.URL.Query().Get("api")
-	
+
 	// 记录请求开始时间
 	startTime := time.Now()
 
@@ -308,14 +699,14 @@ func handler(w http.ResponseWriter, r *http.Request) {
 			serveErrorPage(w, r, http.StatusUnauthorized)
 			return
 		}
-		
+
 		// 验证API token是否有效
 		if !tokenCheck(token) {
 			logRequest(r, http.StatusUnauthorized, startTime)
 			serveErrorPage(w, r, http.StatusUnauthorized)
 			return
 		}
-		
+
 		logRequest(r, http.StatusOK, startTime)
 		serveLogs(w, r)
 		return
@@ -382,10 +773,10 @@ func handler(w http.ResponseWriter, r *http.Request) {
 func serveLogs(w http.ResponseWriter, r *http.Request) {
 	// 检查是否指定了特定的日志文件
 	logFile := r.URL.Query().Get("file")
-	
+
 	// 构建日志目录路径
 	logPath := filepath.Join(dataDir, logDir)
-	
+
 	// 如果指定了特定的日志文件
 	if logFile != "" {
 		// 防止路径遍历攻击
@@ -393,35 +784,35 @@ func serveLogs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid file path", http.StatusBadRequest)
 			return
 		}
-		
+
 		// 构建完整文件路径
 		fullPath := filepath.Join(logPath, logFile)
-		
+
 		// 检查文件是否存在且在日志目录中
 		relPath, err := filepath.Rel(logPath, fullPath)
 		if err != nil || strings.Contains(relPath, "..") {
 			http.Error(w, "Invalid file path", http.StatusBadRequest)
 			return
 		}
-		
+
 		// 检查文件是否存在
 		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 			http.Error(w, "Log file not found", http.StatusNotFound)
 			return
 		}
-		
+
 		// 提供日志文件内容
 		http.ServeFile(w, r, fullPath)
 		return
 	}
-	
+
 	// 如果没有指定特定的日志文件，列出所有日志文件
 	files, err := os.ReadDir(logPath)
 	if err != nil {
 		http.Error(w, "Failed to read log directory", http.StatusInternalServerError)
 		return
 	}
-	
+
 	// 创建HTML页面显示日志文件列表
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, "<!DOCTYPE html>\n<html>\n<head>\n")
@@ -438,17 +829,17 @@ func serveLogs(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "</head>\n<body>\n")
 	fmt.Fprintf(w, "<h1>RawBox 日志文件</h1>\n")
 	fmt.Fprintf(w, "<ul>\n")
-	
+
 	// 添加返回首页的链接
 	fmt.Fprintf(w, "<li><a href=\"/\">&larr; 返回首页</a></li>\n")
-	
+
 	// 列出所有日志文件
 	for _, file := range files {
 		if !file.IsDir() && filepath.Ext(file.Name()) == ".txt" {
 			fmt.Fprintf(w, "<li><a href=\"/log?file=%s\">%s</a></li>\n", file.Name(), file.Name())
 		}
 	}
-	
+
 	fmt.Fprintf(w, "</ul>\n</body>\n</html>")
 }
 
@@ -489,7 +880,7 @@ func serveRaw(w http.ResponseWriter, r *http.Request, filePath string) {
 
 	// 获取文件扩展名
 	ext := strings.ToLower(filepath.Ext(filePath))
-	
+
 	// 定义需要以文本形式显示的文件扩展名
 	textExts := map[string]bool{
 		".md":   true,
@@ -503,7 +894,7 @@ func serveRaw(w http.ResponseWriter, r *http.Request, filePath string) {
 		".ini":  true,
 		".json": true,
 	}
-	
+
 	// 如果是文本文件，则以文本形式显示
 	if textExts[ext] {
 		// 读取文件内容
@@ -513,13 +904,13 @@ func serveRaw(w http.ResponseWriter, r *http.Request, filePath string) {
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
-		
+
 		// 设置Content-Type为纯文本
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		
+
 		// 设置Content-Length
 		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
-		
+
 		// 写入响应
 		w.WriteHeader(http.StatusOK)
 		w.Write(content)
@@ -648,7 +1039,7 @@ func loadUARules() {
 		}
 		log.Printf("Loaded UA blacklist from environment: %v", newRules.Blacklist)
 	}
-	
+
 	// 如果没有配置规则，记录日志
 	if len(newRules.Whitelist) == 0 && len(newRules.Blacklist) == 0 {
 		log.Println("No UA rules loaded from environment variables")
@@ -656,4 +1047,40 @@ func loadUARules() {
 
 	// 原子替换UA规则
 	uaRules = newRules
+}
+
+// healthCheck 健康检查接口
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	// 只接受 GET 请求
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "error",
+			"message": "Method not allowed",
+		})
+		return
+	}
+
+	// 检查数据目录是否可访问
+	if _, err := os.Stat(dataDir); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "error",
+			"message": "Data directory not accessible",
+			"timestamp": time.Now().Unix(),
+		})
+		return
+	}
+
+	// 返回健康状态
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok",
+		"timestamp": time.Now().Unix(),
+		"version": "v0.1.0",
+		"uptime": time.Since(startTime).String(),
+	})
 }

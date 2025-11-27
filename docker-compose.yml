@@ -6,20 +6,26 @@ services:
     container_name: RawBox
     network_mode: bridge
     ports:
-      - "8080:8080"
+      - "18080:18080"
     volumes:
       - ./data:/data:rw
     environment:
       # 服务端口（这里指定容器启动的端口）
-      - PORT=8080
+      - PORT=18080
       # 明确指定数据目录
       - DATA_DIR=/data
+      # 管理员配置
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=admin123456
       # API tokens，用逗号分隔多个token
-      - API_TOKENS=token1,token2,token3
+      - API_TOKENS=123
+      # 会话配置
+      - SESSION_SECRET=rawbox-secret-key-12345
+      - SESSION_TIMEOUT=3600
       # UA 白名单
-      - UA_WHITELIST=Mozilla,Chrome
+      - UA_WHITELIST=
       # UA 黑名单
-      - UA_BLACKLIST=Bot,Spider
+      - UA_BLACKLIST=
       # 时区设置
       - TZ=Asia/Shanghai
     restart: unless-stopped
